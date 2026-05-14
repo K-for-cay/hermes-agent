@@ -6173,6 +6173,9 @@ class GatewayRunner:
                     return await self._handle_goal_command(event)
                 return "Agent is running — use /goal status / pause / clear mid-run, or /stop before setting a new goal."
 
+            if _cmd_def_inner and _cmd_def_inner.name == "quantum-loop":
+                return await self._handle_quantum_loop_command(event)
+
             # /subgoal is safe mid-run — it only modifies the goal's
             # subgoals list, which the judge reads at the next turn
             # boundary. No race with the running turn.
@@ -6560,6 +6563,9 @@ class GatewayRunner:
         if canonical == "goal":
             return await self._handle_goal_command(event)
 
+        if canonical == "quantum-loop":
+            return await self._handle_quantum_loop_command(event)
+
         if canonical == "subgoal":
             return await self._handle_subgoal_command(event)
 
@@ -6751,6 +6757,10 @@ class GatewayRunner:
                             session_entry=session_entry,
                             source=source,
                             final_response=_final_text,
+                        )
+                        await self._post_turn_quantum_loop_continuation(
+                            session_entry=session_entry,
+                            source=source,
                         )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
@@ -7610,6 +7620,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                persist_user_message="" if getattr(event, "internal", False) else None,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -9411,6 +9422,92 @@ class GatewayRunner:
         return await self._handle_message(retry_event)
 
     # ────────────────────────────────────────────────────────────────
+    # /quantum-loop — post-final-response continuation loop
+    # ────────────────────────────────────────────────────────────────
+    def _get_quantum_loop_session_id(self, source: Any) -> str:
+        if source is None:
+            return "default"
+        try:
+            session_entry = self.session_store.get_or_create_session(source)
+            return getattr(session_entry, "session_id", None) or self._session_key_for_source(source)
+        except Exception:
+            return self._session_key_for_source(source)
+
+    async def _handle_quantum_loop_command(self, event: "MessageEvent") -> str:
+        usage = "Usage: /quantum-loop [enable|disable|status] [--max-iterations N] [--max-minutes N]"
+        try:
+            args = shlex.split((event.get_command_args() or "").strip())
+        except ValueError as exc:
+            return f"{usage}\n{exc}"
+        action = args[0].lower().replace("_", "-") if args else "status"
+        if action in {"on", "start"}:
+            action = "enable"
+        if action in {"off", "stop", "clear"}:
+            action = "disable"
+        if action not in {"enable", "disable", "status"}:
+            return usage
+
+        max_iterations = None
+        max_minutes = None
+        idx = 1
+        while idx < len(args):
+            arg = args[idx]
+            if arg == "--max-iterations" and idx + 1 < len(args):
+                try:
+                    max_iterations = int(args[idx + 1])
+                except ValueError:
+                    return f"{usage}\n--max-iterations must be an integer >= 1."
+                idx += 2
+                continue
+            if arg == "--max-minutes" and idx + 1 < len(args):
+                try:
+                    max_minutes = float(args[idx + 1])
+                except ValueError:
+                    return f"{usage}\n--max-minutes must be a number > 0."
+                idx += 2
+                continue
+            return usage
+
+        from tools.quantum_loop_tool import (
+            disable_quantum_loop,
+            enable_quantum_loop,
+            get_quantum_loop_state,
+        )
+
+        session_key = self._get_quantum_loop_session_id(event.source)
+        if action == "enable":
+            try:
+                state = enable_quantum_loop(
+                    session_key=session_key,
+                    max_iterations=max_iterations,
+                    max_minutes=max_minutes,
+                )
+            except ValueError as exc:
+                return f"{usage}\n{exc}"
+            limit_parts = []
+            if state.get("max_iterations") is not None:
+                limit_parts.append(f"max_iterations={state['max_iterations']}")
+            if state.get("max_minutes") is not None:
+                limit_parts.append(f"max_minutes={state['max_minutes']}")
+            suffix = f" ({', '.join(limit_parts)})" if limit_parts else ""
+            return f"Quantum Loop enabled{suffix}."
+        if action == "disable":
+            disable_quantum_loop(session_key=session_key)
+            return "Quantum Loop disabled."
+
+        state = get_quantum_loop_state(session_key=session_key)
+        if not state.get("enabled"):
+            reason = state.get("disabled_reason")
+            return f"Quantum Loop is disabled{f' ({reason})' if reason else ''}."
+        iterations = int(state.get("iterations", 0))
+        limits = []
+        if state.get("max_iterations") is not None:
+            limits.append(f"max_iterations={state['max_iterations']}")
+        if state.get("max_minutes") is not None:
+            limits.append(f"max_minutes={state['max_minutes']}")
+        return f"Quantum Loop is enabled; iterations={iterations}{'; ' + ', '.join(limits) if limits else ''}."
+
+    # ────────────────────────────────────────────────────────────────
     # /goal — persistent cross-turn goals (Ralph-style loop)
     # ────────────────────────────────────────────────────────────────
     def _goal_max_turns_from_config(self) -> int:
@@ -9645,6 +9742,39 @@ class GatewayRunner:
                 logger.debug("goal continuation: post-delivery callback registration failed: %s", exc)
 
         await _deliver()
+
+    async def _post_turn_quantum_loop_continuation(
+        self,
+        *,
+        session_entry: Any,
+        source: Any,
+    ) -> None:
+        try:
+            from tools.quantum_loop_tool import QUANTUM_LOOP_PROMPT, reserve_quantum_loop_iteration
+        except Exception as exc:
+            logger.debug("quantum loop: module unavailable: %s", exc)
+            return
+
+        session_id = getattr(session_entry, "session_id", None) or self._get_quantum_loop_session_id(source)
+        state = reserve_quantum_loop_iteration(session_key=session_id)
+        if not state or source is None:
+            return
+
+        try:
+            adapter = self.adapters.get(source.platform)
+            _quick_key = self._session_key_for_source(source)
+            if adapter and _quick_key:
+                cont_event = MessageEvent(
+                    text="",
+                    message_type=MessageType.TEXT,
+                    source=source,
+                    message_id=None,
+                    channel_prompt=QUANTUM_LOOP_PROMPT,
+                    internal=True,
+                )
+                self._enqueue_fifo(_quick_key, cont_event, adapter)
+        except Exception as exc:
+            logger.debug("quantum loop: enqueue failed: %s", exc)
 
     async def _post_turn_goal_continuation(
         self,
@@ -14298,6 +14428,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -15473,7 +15604,12 @@ class GatewayRunner:
                 else:
                     _run_message = message
 
-                result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(
+                    _run_message,
+                    conversation_history=agent_history,
+                    task_id=session_id,
+                    persist_user_message=persist_user_message,
+                )
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent
@@ -16199,6 +16335,7 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    persist_user_message="" if getattr(pending_event, "internal", False) else None,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:
