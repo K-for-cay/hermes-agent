@@ -9435,12 +9435,15 @@ class GatewayRunner:
             return self._session_key_for_source(source)
 
     async def _handle_quantum_loop_command(self, event: "MessageEvent") -> str:
-        usage = "Usage: /quantum-loop [enable|disable|status] [--max-iterations N] [--max-minutes N]"
-        try:
-            args = shlex.split((event.get_command_args() or "").strip())
-        except ValueError as exc:
-            return f"{usage}\n{exc}"
-        action = args[0].lower().replace("_", "-") if args else "status"
+        usage = "Usage: /quantum-loop [enable|disable|status] [--max-iterations N] [--max-minutes N] [request]"
+        raw_args = (event.get_command_args() or "").strip()
+        action = "status"
+        rest = ""
+        if raw_args:
+            parts = raw_args.split(None, 1)
+            first = parts[0]
+            action = first.lower().replace("_", "-")
+            rest = parts[1].lstrip() if len(parts) > 1 else ""
         if action in {"on", "start"}:
             action = "enable"
         if action in {"off", "stop", "clear"}:
@@ -9450,24 +9453,31 @@ class GatewayRunner:
 
         max_iterations = None
         max_minutes = None
-        idx = 1
-        while idx < len(args):
-            arg = args[idx]
-            if arg == "--max-iterations" and idx + 1 < len(args):
+        request_text = ""
+        while rest:
+            stripped = rest.lstrip()
+            if stripped.startswith("--max-iterations"):
+                parts = stripped.split(None, 2)
+                if len(parts) < 2 or parts[0] != "--max-iterations":
+                    return usage
                 try:
-                    max_iterations = int(args[idx + 1])
+                    max_iterations = int(parts[1])
                 except ValueError:
                     return f"{usage}\n--max-iterations must be an integer >= 1."
-                idx += 2
+                rest = parts[2] if len(parts) > 2 else ""
                 continue
-            if arg == "--max-minutes" and idx + 1 < len(args):
+            if stripped.startswith("--max-minutes"):
+                parts = stripped.split(None, 2)
+                if len(parts) < 2 or parts[0] != "--max-minutes":
+                    return usage
                 try:
-                    max_minutes = float(args[idx + 1])
+                    max_minutes = float(parts[1])
                 except ValueError:
                     return f"{usage}\n--max-minutes must be a number > 0."
-                idx += 2
+                rest = parts[2] if len(parts) > 2 else ""
                 continue
-            return usage
+            request_text = stripped
+            break
 
         from tools.quantum_loop_tool import (
             disable_quantum_loop,
@@ -9491,6 +9501,19 @@ class GatewayRunner:
             if state.get("max_minutes") is not None:
                 limit_parts.append(f"max_minutes={state['max_minutes']}")
             suffix = f" ({', '.join(limit_parts)})" if limit_parts else ""
+            if request_text:
+                adapter = self.adapters.get(event.source.platform) if event.source else None
+                _quick_key = self._session_key_for_source(event.source) if event.source else None
+                if adapter and _quick_key:
+                    kickoff_event = MessageEvent(
+                        text=request_text,
+                        message_type=MessageType.TEXT,
+                        source=event.source,
+                        message_id=event.message_id,
+                        channel_prompt=event.channel_prompt,
+                    )
+                    self._enqueue_fifo(_quick_key, kickoff_event, adapter)
+                return f"Quantum Loop enabled{suffix}. Queued request."
             return f"Quantum Loop enabled{suffix}."
         if action == "disable":
             disable_quantum_loop(session_key=session_key)

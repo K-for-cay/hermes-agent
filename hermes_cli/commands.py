@@ -105,7 +105,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
                args_hint="[text | pause | resume | clear | status]"),
     CommandDef("quantum-loop", "Loop after final content until disabled or bounded limits are reached", "Session",
-               aliases=("quantum_loop", "ql"), args_hint="[enable|disable|status] [--max-iterations N] [--max-minutes N]",
+               aliases=("quantum_loop", "ql"), args_hint="[enable|disable|status] [--max-iterations N] [--max-minutes N] [request]",
                subcommands=("enable", "disable", "status")),
     CommandDef("subgoal", "Add or manage extra criteria on the active goal", "Session",
                args_hint="[text | remove N | clear]"),
