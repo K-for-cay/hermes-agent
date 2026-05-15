@@ -6758,10 +6758,11 @@ class GatewayRunner:
                             source=source,
                             final_response=_final_text,
                         )
-                        await self._post_turn_quantum_loop_continuation(
-                            session_entry=session_entry,
-                            source=source,
-                        )
+                        if _should_clear_resume_pending_after_turn(_agent_result):
+                            await self._post_turn_quantum_loop_continuation(
+                                session_entry=session_entry,
+                                source=source,
+                            )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
             return _agent_result
