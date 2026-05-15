@@ -7621,6 +7621,7 @@ class GatewayRunner:
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
                 persist_user_message="" if getattr(event, "internal", False) else None,
+                internal_continuation=getattr(event, "internal", False),
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -14429,6 +14430,7 @@ class GatewayRunner:
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
         persist_user_message: Optional[str] = None,
+        internal_continuation: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -15609,6 +15611,7 @@ class GatewayRunner:
                     conversation_history=agent_history,
                     task_id=session_id,
                     persist_user_message=persist_user_message,
+                    internal_continuation=internal_continuation,
                 )
             finally:
                 unregister_gateway_notify(_approval_session_key)
@@ -16336,6 +16339,7 @@ class GatewayRunner:
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
                     persist_user_message="" if getattr(pending_event, "internal", False) else None,
+                    internal_continuation=getattr(pending_event, "internal", False),
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:

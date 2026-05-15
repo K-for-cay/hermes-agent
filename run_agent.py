@@ -11802,6 +11802,7 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        internal_continuation: bool = False,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
@@ -11818,6 +11819,8 @@ class AIAgent:
                 transcripts/history when user_message contains API-only
                 synthetic prefixes.
                     or queuing follow-up prefetch work.
+            internal_continuation: Continue from conversation history without
+                appending a new user turn.
 
         Returns:
             Dict: Complete conversation result with final response and message history
@@ -11974,7 +11977,8 @@ class AIAgent:
         # automatically re-applied on every API call (including session continuations).
         
         # Track user turns for memory flush and periodic nudge logic
-        self._user_turn_count += 1
+        if not internal_continuation:
+            self._user_turn_count += 1
 
         # Reset the streaming context scrubber at the top of each turn so a
         # hung span from a prior interrupted stream can't taint this turn's
@@ -11991,6 +11995,9 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+        if internal_continuation:
+            original_user_message = ""
+
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
@@ -12004,11 +12011,15 @@ class AIAgent:
                 self._turns_since_memory = 0
 
         # Add user message
-        user_msg = {"role": "user", "content": user_message}
-        messages.append(user_msg)
-        current_turn_user_idx = len(messages) - 1
-        self._persist_user_message_idx = current_turn_user_idx
-        
+        if internal_continuation:
+            current_turn_user_idx = None
+            self._persist_user_message_idx = None
+        else:
+            user_msg = {"role": "user", "content": user_message}
+            messages.append(user_msg)
+            current_turn_user_idx = len(messages) - 1
+            self._persist_user_message_idx = current_turn_user_idx
+
         if not self.quiet_mode:
             _print_preview = _summarize_user_message_for_log(user_message)
             self._safe_print(f"💬 Starting conversation: '{_print_preview[:60]}{'...' if len(_print_preview) > 60 else ''}'")
